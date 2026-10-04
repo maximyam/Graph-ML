@@ -17,7 +17,7 @@ avoid pushing large data into repo
 everyone can push and pull files. lets all work on main but update the group when we push something new! pls ensure it works / dont break pipeline 
 
 ### to retrieve latest 
-git fetch 
+git pull 
 
 ### to push update 
 git add .  / git add (type files manually)
