@@ -16,10 +16,14 @@ avoid pushing large data into repo
 ## tldr on git 
 everyone can push and pull files. lets all work on main but update the group when we push something new! pls ensure it works / dont break pipeline 
 
-# to retrieve latest 
+### to retrieve latest 
 git fetch 
 
-# to push update 
+### to push update 
 git add .  / git add (type files manually)
 git commit -m "[NAME] whatyoudid" 
 git push 
+
+
+## Last update
+Maxim pushed testing code 
