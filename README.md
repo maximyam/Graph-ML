@@ -17,11 +17,12 @@ data_processing.ipynb -> Step 1
 
 --- How teammates reload (no need to rerun the pipeline) ---
 import anndata as ad
-work = ad.read_h5ad("data/work_processed.h5ad")      # full object
-import numpy as np, scipy.sparse as sp, pandas as pd
-X   = np.load("data/X_pca.npy")                       # node features (n x 30)
-A   = sp.load_npz("data/connectivities.npz")          # kNN adjacency (sparse)
-meta= pd.read_csv("data/cell_metadata.csv", index_col=0)  # labels + masks
+work = ad.read_h5ad("data/processed/work_processed.h5ad")   # full object (has obsm["X_features"], uns["feature_blocks"])
+import numpy as np, scipy.sparse as sp, pandas as pd, json
+X    = np.load("data/processed/X_features.npy")             # augmented node features
+cols = json.load(open("data/processed/feature_blocks.json"))# {"pca":[0,30], "markers":[...], ...}
+A    = sp.load_npz("data/processed/connectivities.npz")     # kNN adjacency (sparse)
+meta = pd.read_csv("data/processed/cell_metadata.csv", index_col=0)  # labels + masks + local_homophily
 
 
 ## How to run 

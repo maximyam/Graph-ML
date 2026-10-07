@@ -85,10 +85,24 @@ comparison.
 
 ## Part 8 — Feature Engineering
 Augments `P` with three **ablatable** blocks — curated marker genes (24), QC
-covariates (3), label-free graph-structure features (5) — into
-`work.obsm["X_features"]` (62-D) with a block→column map, z-scored on train
-statistics only. Local homophily is computed as an **analysis-only** column (no
-leakage). A LogReg direction check showed macro-F1 0.415 → 0.431.
+covariates (3), label-free graph-structure features (6) — into
+`work.obsm["X_features"]` with a block→column map, z-scored on train statistics
+only. Local homophily is computed as an **analysis-only** column (no leakage).
+
+The graph block is `degree, clustering, mean_nbr_dist, nbr_entropy, reciprocity,
+nbr_dispersion` — each a distinct, label-free neighbourhood summary (connectivity,
+triangle-closure, local density, categorical mixing, edge reciprocity, boundary
+offset).
+
+> **Why not classic centrality (PageRank, Katz, eigenvector, betweenness)?** The
+> graph is a kNN graph built from PCA, so every node has (near) the same degree
+> by construction — no hubs, no scale-free structure. On a degree-regular graph
+> these centralities collapse into local-density proxies that add little beyond
+> `degree` and nothing about class identity; betweenness is also ~O(V·E)
+> (prohibitive at 65k nodes) and only re-finds boundary cells that `nbr_entropy`/
+> `nbr_dispersion` already detect. We therefore use neighbourhood-heterogeneity
+> features, which measure the boundary/mixing structure this project is about.
+
 **Contribution:** injects known biology and topology that PCA averages away — the
 lever for minority-class performance — while the toggles make each block a clean
 ablation and the block map feeds Step 4 attribution.
@@ -118,3 +132,44 @@ features and the graph, the graph is measured (homophily) and partitioned
 notebook's job is to produce **(1) node features `X_features`/`P`, (2) the kNN
 graph, (3) a measured homophily profile, (4) a reusable split** — the four things
 the entire GNN study is built on.
+
+
+
+## What has been done for data processed 
+
+  Cleaning & normalization
+  - QC-filtered raw 65,877 × 33,939 → 65,578 cells × 13,200 genes
+  (99.5% kept, every class ≥96%, per-class guardrail enforced)
+  - Normalized to 10,000 counts/cell + log1p; raw counts kept in a
+  layer
+  - Selected 2,000 highly variable genes for PCA
+  
+  Representation & graph
+  - PCA: 50 components, top 30 → P (the node-feature matrix)
+  - kNN graph (k=15) in PCA space + Leiden clusters (sanity check,
+  not labels)
+  
+  Soundness artifacts
+  - Homophily audit: global edge homophily = 0.412 (measured,
+  reframed hypothesis to label-granularity)
+  - Coarse-vs-fine homophily (celltype_coarse)
+  - Stratified transductive split: train/val/test_mask (60/20/20)
+  
+  Engineered node features → work.obsm["X_features"] (65,578 × 62)
+  - PCA (30) + marker genes (24) + QC covariates (3) +
+  graph-structure (5)
+  - Block→column map in uns["feature_blocks"]; each block
+  toggleable for ablation
+  - local_homophily per node stored as analysis-only (not a
+  feature, avoids leakage)
+  
+  Saved to data/ (git-ignored)
+  - work_processed.h5ad (107 MB, complete object)
+  - X_pca.npy (13 MB), X_features.npy (33 MB), feature_blocks.json
+  - connectivities.npz (kNN graph), cell_metadata.csv (labels +
+  masks + local homophily)
+  
+  In short: raw counts → cleaned, normalized, 30-D PCA
+  representation + kNN graph + measured homophily + clean split +
+  a 62-D augmented feature matrix, all persisted for one-line
+  reload by teammates.
