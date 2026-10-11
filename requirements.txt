@@ -1,3 +1,17 @@
 scanpy
 scvelo 
 igraph
+
+anndata
+numpy
+scipy
+pandas
+matplotlib
+seaborn
+# MLP sample weights require scikit-learn 1.7 or later.
+scikit-learn>=1.7
+joblib
+threadpoolctl
+nbformat
+ipykernel
+notebook
