@@ -10,6 +10,8 @@ matplotlib
 seaborn
 # MLP sample weights require scikit-learn 1.7 or later.
 scikit-learn>=1.7
+# GNN models (notebooks 03 and 04, src/models.py).
+torch
 joblib
 threadpoolctl
 nbformat
