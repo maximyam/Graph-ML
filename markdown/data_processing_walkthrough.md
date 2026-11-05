@@ -53,10 +53,10 @@ cell-to-cell distances — which every graph and embedding depends on — reflec
 biology, not capture depth.
 
 ## Part 5 — Representation: PCA
-Runs PCA on the HVGs (50 components, top 30 → `P`) with a variance-ratio curve
+Runs PCA on the HVGs (50 components, top 50 → `P`) with a variance-ratio curve
 and per-PC gene-loading bars.
 **Contribution:** this is the core dimensionality reduction. It compresses
-~13,200 noisy, correlated genes into 30 orthogonal axes that track real lineage
+~13,200 noisy, correlated genes into 50 orthogonal axes that track real lineage
 programs, escaping the curse of dimensionality. `P` becomes the **node-feature
 matrix** for every model, and the loadings are the first interpretability hook
 (precursor to Step 4's gradient-through-loadings attribution).
@@ -140,36 +140,37 @@ the entire GNN study is built on.
   Cleaning & normalization
   - QC-filtered raw 65,877 × 33,939 → 65,578 cells × 13,200 genes
   (99.5% kept, every class ≥96%, per-class guardrail enforced)
-  - Normalized to 10,000 counts/cell + log1p; raw counts kept in a
-  layer
+  - Normalized to 10,000 counts/cell + log1p; raw counts preserved in
+  a layer
   - Selected 2,000 highly variable genes for PCA
   
   Representation & graph
-  - PCA: 50 components, top 30 → P (the node-feature matrix)
+  - PCA: 50 components, top 50 → P (the node-feature matrix)
   - kNN graph (k=15) in PCA space + Leiden clusters (sanity check,
   not labels)
   
   Soundness artifacts
-  - Homophily audit: global edge homophily = 0.412 (measured,
+  - Homophily audit: global edge homophily = 0.412 (measured;
   reframed hypothesis to label-granularity)
   - Coarse-vs-fine homophily (celltype_coarse)
   - Stratified transductive split: train/val/test_mask (60/20/20)
   
-  Engineered node features → work.obsm["X_features"] (65,578 × 62)
-  - PCA (30) + marker genes (24) + QC covariates (3) +
-  graph-structure (5)
-  - Block→column map in uns["feature_blocks"]; each block
-  toggleable for ablation
-  - local_homophily per node stored as analysis-only (not a
-  feature, avoids leakage)
+  Engineered node features → work.obsm["X_features"] (65,578 × 83)
+  - PCA (50) + marker genes (24) + QC covariates (3) +
+  graph-structure (6)
+  - Graph block: degree, clustering, mean_nbr_dist, nbr_entropy,
+  reciprocity, nbr_dispersion (label-free; PageRank/wdegree dropped)
+  - Block→column map in uns["feature_blocks"]; each block toggleable
+  for ablation
+  - local_homophily per node stored as analysis-only (not a feature,
+  avoids leakage)
   
-  Saved to data/ (git-ignored)
-  - work_processed.h5ad (107 MB, complete object)
+  Saved to data/processed/ (git-ignored)
+  - work_processed.h5ad (~108 MB, complete object)
   - X_pca.npy (13 MB), X_features.npy (33 MB), feature_blocks.json
-  - connectivities.npz (kNN graph), cell_metadata.csv (labels +
-  masks + local homophily)
+  - connectivities.npz (kNN graph), cell_metadata.csv (labels + masks
+  + local_homophily)
   
-  In short: raw counts → cleaned, normalized, 30-D PCA
-  representation + kNN graph + measured homophily + clean split +
-  a 62-D augmented feature matrix, all persisted for one-line
-  reload by teammates.
+  In short: raw counts → cleaned, normalized, 50-D PCA representation
+  + kNN graph + measured homophily + clean split + a 83-D augmented
+  feature matrix, all persisted for one-line reload by teammates.
