@@ -33,7 +33,7 @@ Outputs go to **`data/graph_engineering/`**. Matching graph files are reused, bu
 | Section | What it does |
 |---|---|
 | 1. Settings | Uses seed 42 and the existing 60/20/20 train, validation and test masks. Defines two training-label budgets. |
-| 2. Load inputs | Checks cell order and split masks. Uses the first 30 PCs as features. |
+| 2. Load inputs | Checks cell order and split masks. Uses the first 50 PCs as features. |
 | 3. k-NN | Finds 15 other neighbours per cell using Euclidean distance. Every query batch searches all cells. Keeps an undirected edge if either cell selects the other. |
 | 4. SNN | Weights each k-NN edge by the Jaccard overlap of its neighbour lists. Removes edges with zero overlap. |
 | 5. Graph statistics | Checks graph structure and reports degrees, components, isolated cells, clustering and weights. Includes the Scanpy graph as a reference. |
@@ -64,7 +64,7 @@ Paths below are relative to **`data/graph_engineering/`**. Section 12 of the not
 |---|---|
 | `manifest.json` | Settings, file hashes and completion status. `graph_exports_complete` confirms the GNN inputs were saved. `baselines_complete` confirms all six baseline runs finished. |
 | `cell_ids.csv`, `class_names.json` | Shared cell order and the mapping from integer labels to cell types. |
-| `X_pca.npy` | Original 30-PC features used to build the graphs. |
+| `X_pca.npy` | Original 50-PC features used to build the graphs. |
 | `graphs/` | Sparse k-NN and SNN adjacency matrices, neighbour indices and distances. |
 | `labels_5pct/`, `labels_full/` | Each budget's `X_scaled.npy`, `masks.npz`, `training_labels.npy`, `validation_labels.npy` and fitted scaler. |
 | `analysis/` | Graph statistics and homophily tables. Use for analysis only. |
