@@ -4,6 +4,7 @@ Step 4 evaluation and interpretability utilities.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Iterable
 from dataclasses import dataclass
 from hashlib import sha256
@@ -20,6 +21,10 @@ import seaborn as sns
 import torch
 from scipy.stats import spearmanr
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_sample_weight
+from threadpoolctl import threadpool_limits
 
 try:
     from .models import GNNClassifier
@@ -322,19 +327,123 @@ def split_mask(data: ExperimentData, split: str) -> np.ndarray:
     return data.validation_mask if split == "validation" else data.test_mask
 
 
-def load_mlp_baseline(results_root: str | Path) -> pd.DataFrame:
-    """Read notebook 02's validation scores and per-class F1 for each MLP seed."""
-    results_root = Path(results_root)
-    scores = pd.read_csv(results_root / "validation_results.csv")
-    per_class = pd.read_csv(results_root / "per_class_f1.csv")
-    keys = ["budget", "model", "seed", "pca_components", "width"]
-    classes = per_class.pivot(index=keys, columns="class_name", values="f1")
-    classes = classes.add_prefix("f1::").reset_index()
-    merged = scores.merge(classes, on=keys, how="left", validate="one_to_one")
-    class_columns = [column for column in merged if column.startswith("f1::")]
-    if not class_columns or merged[class_columns].isna().any().any():
-        raise ValueError("Notebook 02's MLP per-class scores are incomplete.")
-    return merged
+# Notebook 02's MLP: one ReLU hidden layer (64 or 128 units, chosen on validation
+# macro-F1), Adam, class-balanced sample weights, 200 epochs and patience 25.
+MLP_WIDTHS = (64, 128)
+MLP_SETTINGS = {
+    "activation": "relu",
+    "solver": "adam",
+    "alpha": 1e-4,
+    "batch_size": 256,
+    "learning_rate_init": 1e-3,
+    "early_stopping": False,
+    "shuffle": True,
+}
+
+
+def _train_mlp(x_train, y_train, x_val, y_val, classes, settings, epochs, patience):
+    """Notebook 02's MLP loop: keep the epoch with the best validation macro-F1."""
+    scaler = StandardScaler().fit(x_train)
+    xt = scaler.transform(x_train).astype(np.float32)
+    xv = scaler.transform(x_val).astype(np.float32)
+    weights = compute_sample_weight("balanced", y_train)
+    settings = {**settings, "batch_size": min(settings["batch_size"], len(x_train))}
+    model = MLPClassifier(**settings)
+    best, best_score, stale = None, -np.inf, 0
+    for _ in range(epochs):
+        model.partial_fit(xt, y_train, classes=classes, sample_weight=weights)
+        value = f1_score(
+            y_val, model.predict(xv), labels=classes, average="macro", zero_division=0
+        )
+        if value > best_score + 1e-8:
+            best, best_score, stale = copy.deepcopy(model), float(value), 0
+        else:
+            stale += 1
+        if stale >= patience:
+            break
+    return best, scaler, best_score
+
+
+def mlp_seed_predictions(
+    cache: DataCache,
+    budgets: Iterable[str],
+    seeds: Iterable[int],
+    cache_dir: str | Path,
+    epochs: int = 200,
+    patience: int = 25,
+    threads: int = 4,
+) -> dict[str, dict[int, np.ndarray]]:
+    """
+    Notebook 02's MLP baseline for every budget and seed, predicted for all cells.
+
+    Only ``random_state`` changes with the seed. Masks are the GNN runs' masks, so
+    seed 42 at 5pct and full reproduces notebook 02's saved predictions. Results
+    are cached as ``{budget}_seed{seed}.npy`` in ``cache_dir``.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    pcs = np.load(cache.export_root / "X_pca.npy", allow_pickle=False)
+    pcs = pcs.astype(np.float32)
+    runs: dict[str, dict[int, np.ndarray]] = {}
+    for budget in budgets:
+        data = cache.get(budget, "knn")
+        classes = np.arange(len(data.class_names))
+        train, val = data.train_mask, data.validation_mask
+        runs[budget] = {}
+        for seed in seeds:
+            path = cache_dir / f"{budget}_seed{seed}.npy"
+            if not path.is_file():
+                fits = []
+                with threadpool_limits(limits=threads):
+                    for width in MLP_WIDTHS:
+                        settings = {
+                            **MLP_SETTINGS,
+                            "random_state": seed,
+                            "hidden_layer_sizes": (width,),
+                        }
+                        fits.append(
+                            _train_mlp(
+                                pcs[train],
+                                data.labels[train],
+                                pcs[val],
+                                data.validation_labels[val],
+                                classes,
+                                settings,
+                                epochs,
+                                patience,
+                            )
+                        )
+                    model, scaler, _ = max(fits, key=lambda fit: fit[2])
+                    scaled = scaler.transform(pcs).astype(np.float32)
+                    np.save(path, model.predict(scaled).astype(np.int64))
+            runs[budget][seed] = np.load(path, allow_pickle=False)
+    return runs
+
+
+def load_mlp_baseline(
+    predictions: dict[str, dict[int, np.ndarray]], cache: DataCache
+) -> pd.DataFrame:
+    """
+    Validation scores of the MLP, one row per budget and seed.
+    """
+    rows = []
+    for budget, seeds in predictions.items():
+        data = cache.get(budget, "knn")
+        mask = data.validation_mask
+        targets = all_labels(data)
+        for seed, predicted in seeds.items():
+            metrics = score(predicted[mask], targets[mask], data.class_names)
+            per_class = metrics.pop("per_class_f1")
+            rows.append(
+                {
+                    "budget": budget,
+                    "model": "mlp",
+                    "seed": seed,
+                    **metrics,
+                    **{f"f1::{name}": value for name, value in per_class.items()},
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
