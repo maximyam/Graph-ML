@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from hashlib import sha256
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -37,14 +38,36 @@ T_SUBTYPES = (
     "CD8+/CD45RA+ Naive Cytotoxic",
 )
 
-# Canonical lineage markers named in the team contract, mapped to the fine
-# classes whose logit they should drive. CD34 was removed by QC, so the CD34+
-# class has no canonical marker in this dataset.
+NAIVE_T = ("CD4+/CD45RA+/CD25- Naive T", "CD8+/CD45RA+ Naive Cytotoxic")
+
+# Canonical PBMC markers mapped to the fine classes whose logit they should
+# drive. The first five are the team contract. Only HVGs enter the PCA input,
+# so a marker outside the HVGs cannot influence any model.
 CANONICAL_MARKERS = {
     "CD3E": T_SUBTYPES,
     "MS4A1": ("CD19+ B",),
     "NKG7": ("CD56+ NK",),
     "LYZ": ("CD14+ Monocyte",),
+    "CD34": ("CD34+",),
+    "CD3D": T_SUBTYPES,
+    "CD8A": ("CD8+ Cytotoxic T", "CD8+/CD45RA+ Naive Cytotoxic"),
+    "GZMH": ("CD8+ Cytotoxic T",),
+    "CCL5": ("CD8+ Cytotoxic T",),
+    "CCR7": NAIVE_T,
+    "SELL": NAIVE_T,
+    "IL7R": ("CD4+/CD45RO+ Memory",),
+    "S100A4": ("CD4+/CD45RO+ Memory",),
+    "FOXP3": ("CD4+/CD25 T Reg",),
+    "IL2RA": ("CD4+/CD25 T Reg",),
+    "GATA3": ("CD4+ T Helper2",),
+    "PTGDR2": ("CD4+ T Helper2",),
+    "CD79A": ("CD19+ B",),
+    "GNLY": ("CD56+ NK",),
+    "S100A8": ("CD14+ Monocyte",),
+    "FCER1A": ("Dendritic",),
+    "CLEC10A": ("Dendritic",),
+    "PRSS57": ("CD34+",),
+    "MYB": ("CD34+",),
 }
 
 
@@ -54,6 +77,59 @@ def to_coarse(label: str) -> str:
     t_markers = ("T Helper", "Naive T", "Memory", "T Reg", "Cytotoxic")
     is_t = any(marker in label for marker in t_markers)
     return "T cell" if is_t or label.startswith(("CD8", "CD4")) else label
+
+
+# Names, colours and short labels used in every figure, matching the report.
+MODEL_LABELS = {
+    "mlp": "MLP",
+    "gcn": "GCN",
+    "graphsage": "GraphSAGE",
+    "gat": "GAT",
+    "gated_gcn": "Gated GCN",
+    "untrained_gated_gcn": "Untrained Gated GCN",
+}
+MODEL_COLOURS = {
+    "mlp": "black",
+    "gcn": "tab:blue",
+    "graphsage": "tab:orange",
+    "gat": "tab:green",
+    "gated_gcn": "tab:red",
+}
+BUDGET_LABELS = {
+    "1pct": "1%",
+    "2pct": "2%",
+    "5pct": "5%",
+    "10pct": "10%",
+    "20pct": "20%",
+    "full": "Full",
+}
+GRAPH_LABELS = {"knn": "$k$-NN", "snn": "SNN"}
+SHORT_CLASS_NAMES = {
+    "CD4+/CD25 T Reg": "CD4+ T Reg",
+    "CD4+/CD45RA+/CD25- Naive T": "CD4+ Naive T",
+    "CD4+/CD45RO+ Memory": "CD4+ Memory",
+    "CD8+/CD45RA+ Naive Cytotoxic": "CD8+ Naive Cytotoxic",
+}
+
+
+def model_label(model: str) -> str:
+    return MODEL_LABELS.get(model, model)
+
+
+def budget_label(budget: str) -> str:
+    return BUDGET_LABELS.get(budget, budget)
+
+
+def graph_label(graph: str) -> str:
+    if graph in GRAPH_LABELS:
+        return GRAPH_LABELS[graph]
+    if graph.startswith("knn"):
+        return f"$k$-NN ($k$ = {graph.removeprefix('knn')})"
+    return graph
+
+
+def class_label(name: str) -> str:
+    return SHORT_CLASS_NAMES.get(name, name)
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +172,9 @@ class RunSpec:
             graph,
             int(depth.removeprefix("depth")),
             int(seed.removeprefix("seed")),
-            experiment=folder if folder in ("scarcity", "depth") else "main",
+            experiment=folder
+            if folder in ("scarcity", "depth", "neighbourhood")
+            else "main",
         )
 
 
@@ -117,6 +195,46 @@ def run_grid(
             budgets, graphs, depths, models, seeds
         )
     ]
+
+
+SETTING_KEYS = ("experiment", "budget", "graph", "depth")
+
+
+@dataclass(frozen=True)
+class Setting:
+    """One trained configuration: every model and seed share it."""
+
+    experiment: str
+    budget: str
+    graph: str
+    depth: int
+
+    @property
+    def name(self) -> str:
+        return f"{self.experiment}_{self.budget}_{self.graph}_depth{self.depth}"
+
+    @property
+    def columns(self) -> dict[str, Any]:
+        return dict(
+            zip(SETTING_KEYS, (self.experiment, self.budget, self.graph, self.depth))
+        )
+
+    @classmethod
+    def of(cls, spec: RunSpec) -> Setting:
+        return cls(spec.experiment, spec.budget, spec.graph, spec.depth)
+
+
+def group_runs(
+    outputs: dict[RunSpec, RunOutput],
+) -> dict[Setting, dict[str, dict[int, RunOutput]]]:
+    """
+    Nest run outputs as setting -> model -> seed, keeping the evaluation order.
+    """
+    grouped: dict[Setting, dict[str, dict[int, RunOutput]]] = {}
+    for spec, run in outputs.items():
+        models = grouped.setdefault(Setting.of(spec), {})
+        models.setdefault(spec.model, {})[spec.seed] = run
+    return grouped
 
 
 class DataCache:
@@ -204,21 +322,19 @@ def split_mask(data: ExperimentData, split: str) -> np.ndarray:
     return data.validation_mask if split == "validation" else data.test_mask
 
 
-def load_mlp_baseline(
-    prediction_paths: dict[str, Path], cache: DataCache
-) -> pd.DataFrame:
-    """
-    Score notebook 02's saved MLP predictions on the validation split.
-    """
-    rows = []
-    for budget, path in prediction_paths.items():
-        data = cache.get(budget, "knn")
-        predictions = np.load(path, allow_pickle=False)
-        mask = data.validation_mask
-        targets = all_labels(data)
-        metrics = score(predictions[mask], targets[mask], data.class_names)
-        rows.append({"budget": budget, "model": "mlp", "macro_f1": metrics["macro_f1"]})
-    return pd.DataFrame(rows)
+def load_mlp_baseline(results_root: str | Path) -> pd.DataFrame:
+    """Read notebook 02's validation scores and per-class F1 for each MLP seed."""
+    results_root = Path(results_root)
+    scores = pd.read_csv(results_root / "validation_results.csv")
+    per_class = pd.read_csv(results_root / "per_class_f1.csv")
+    keys = ["budget", "model", "seed", "pca_components", "width"]
+    classes = per_class.pivot(index=keys, columns="class_name", values="f1")
+    classes = classes.add_prefix("f1::").reset_index()
+    merged = scores.merge(classes, on=keys, how="left", validate="one_to_one")
+    class_columns = [column for column in merged if column.startswith("f1::")]
+    if not class_columns or merged[class_columns].isna().any().any():
+        raise ValueError("Notebook 02's MLP per-class scores are incomplete.")
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +435,9 @@ def headline_table(
     )
     table = summary.assign(
         experiment=pd.Categorical(
-            summary["experiment"], ["main", "scarcity", "depth"], ordered=True
+            summary["experiment"],
+            ["main", "scarcity", "depth", "neighbourhood"],
+            ordered=True,
         ),
         budget=pd.Categorical(summary["budget"], budgets, ordered=True),
         score=score_text,
@@ -330,7 +448,12 @@ def headline_table(
         aggfunc="first",
         observed=True,
     )
-    mlp_text = mlp.set_index("budget")["macro_f1"].map("{:.3f}".format)
+    mlp_stats = mlp.groupby("budget")["macro_f1"].agg(["mean", "std"])
+    mlp_text = (
+        mlp_stats["mean"].map("{:.3f}".format)
+        + " ± "
+        + mlp_stats["std"].map("{:.3f}".format)
+    )
     row_budgets = table.index.get_level_values("budget").astype(str)
     return table[models].assign(mlp=row_budgets.map(mlp_text)).fillna("")
 
@@ -397,23 +520,32 @@ def within_t_error_share(
     return float(within_t.sum() / wrong.sum())
 
 
+def mean_confusion(runs: dict[int, RunOutput], class_names: list[str]) -> pd.DataFrame:
+    """
+    Row-normalised confusion matrix averaged over seeds.
+    """
+    tables = [
+        confusion_table(run.predictions[run.mask], run.targets[run.mask], class_names)
+        for run in runs.values()
+    ]
+    return sum(tables) / len(tables)
+
+
 def granularity_table(
-    outputs: dict[RunSpec, RunOutput], cache: DataCache, experiment: str = "main"
+    outputs: dict[RunSpec, RunOutput], cache: DataCache
 ) -> pd.DataFrame:
     """
-    Fine vs T-merged macro-F1 and within-T error share, averaged over seeds.
+    Fine vs T-merged macro-F1 and within-T error share for every setting and
+    model, averaged over seeds.
     """
     rows = []
     for spec, run in outputs.items():
-        if spec.experiment != experiment:
-            continue
         names = cache.get(spec.budget, spec.graph).class_names
         predictions, targets = run.predictions[run.mask], run.targets[run.mask]
         rows.append(
             {
+                **Setting.of(spec).columns,
                 "model": spec.model,
-                "budget": spec.budget,
-                "graph": spec.graph,
                 "seed": spec.seed,
                 "fine_macro_f1": score(predictions, targets, names)["macro_f1"],
                 "coarse_macro_f1": coarse_score(predictions, targets, names)[
@@ -426,7 +558,7 @@ def granularity_table(
         )
     return (
         pd.DataFrame(rows)
-        .groupby(["budget", "graph", "model"])[
+        .groupby([*SETTING_KEYS, "model"], sort=False)[
             ["fine_macro_f1", "coarse_macro_f1", "within_t_error_share"]
         ]
         .mean()
@@ -492,19 +624,27 @@ def per_class_vs_homophily(
     results: pd.DataFrame,
     homophily: pd.DataFrame,
     class_names: list[str],
-    budget: str,
-    graph: str,
+    setting: Setting,
+    mlp: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
-    Seed-mean per-class F1 of each model next to the class homophily.
+    Seed-mean per-class F1 of each model in one setting next to the class
+    homophily of that setting's graph. With ``mlp`` (from
+    ``load_mlp_baseline``) the MLP of the same budget is added as a column.
     """
     scores = results[
-        (results["experiment"] == "main")
-        & (results["budget"] == budget)
-        & (results["graph"] == graph)
+        (results["experiment"] == setting.experiment)
+        & (results["budget"] == setting.budget)
+        & (results["graph"] == setting.graph)
+        & (results["depth"] == setting.depth)
     ]
-    per_class = scores.groupby("model")[[f"f1::{c}" for c in class_names]].mean().T
+    per_class = (
+        scores.groupby("model", sort=False)[[f"f1::{c}" for c in class_names]].mean().T
+    )
     per_class.index = class_names
+    if mlp is not None and (mlp["budget"] == setting.budget).any():
+        rows = mlp[mlp["budget"] == setting.budget]
+        per_class["mlp"] = [rows[f"f1::{c}"].mean() for c in class_names]
     per_class = per_class.join(homophily.set_index("celltype"))
     per_class["gate_gain"] = per_class["gated_gcn"] - per_class["gcn"]
     return per_class
@@ -677,7 +817,7 @@ def pc_gradients(
     model: GNNClassifier, data: ExperimentData, cell_mask: np.ndarray
 ) -> np.ndarray:
     """
-    Mean gradient of each class logit with respect to the 30 scaled PCs.
+    Mean gradient of each class logit with respect to the scaled input PCs.
     """
     features, edge_index, edge_weight = _tensors(data)
     labels = all_labels(data)
@@ -739,7 +879,8 @@ def marker_recovery(
     markers: dict[str, Iterable[str]] = CANONICAL_MARKERS,
 ) -> pd.DataFrame:
     """
-    Rank of each canonical marker in its class's attribution.
+    Rank of each canonical marker in its class's attribution. ``in_data`` is
+    False for genes removed in QC.
     """
     pool = attributions.loc[eligible[eligible].index]
     rows = []
@@ -747,7 +888,12 @@ def marker_recovery(
         for name in classes:
             if name not in pool.columns:
                 continue
-            row = {"marker": gene, "celltype": name, "in_hvg": gene in pool.index}
+            row = {
+                "marker": gene,
+                "celltype": name,
+                "in_data": gene in attributions.index,
+                "in_hvg": gene in pool.index,
+            }
             if row["in_hvg"]:
                 ranks = pool[name].rank(ascending=False, method="min")
                 row.update(
@@ -788,7 +934,7 @@ def genes_detected(path: str | Path, cell_ids: np.ndarray) -> np.ndarray:
 
 def dropout_table(
     runs: dict[str, dict[int, RunOutput]],
-    mlp_predictions: np.ndarray,
+    mlp_predictions: dict[int, np.ndarray] | np.ndarray | None,
     n_genes: np.ndarray,
     cell_types: np.ndarray,
     n_bins: int = 4,
@@ -798,6 +944,8 @@ def dropout_table(
 
     Bins are quantiles of ``n_genes`` within each cell type, so every bin has
     the same cell-type mix. Bin 1 has the fewest genes detected (most dropout).
+    With MLP predictions for several seeds the MLP accuracy is their mean.
+    Without MLP predictions for the budget the MLP columns are NaN.
     """
     first = next(iter(next(iter(runs.values())).values()))
     mask, targets = first.mask, first.targets
@@ -807,7 +955,14 @@ def dropout_table(
         ranks = pd.Series(n_genes[members]).rank(method="first", pct=True)
         bins[members] = np.ceil(ranks.to_numpy() * n_bins).astype(int)
 
-    mlp_correct = mlp_predictions == targets
+    if mlp_predictions is None:
+        mlp_correct = np.full(len(targets), np.nan)
+    else:
+        if isinstance(mlp_predictions, np.ndarray):
+            mlp_predictions = {0: mlp_predictions}
+        mlp_correct = np.mean(
+            [(predicted == targets) for predicted in mlp_predictions.values()], axis=0
+        )
     rows = []
     for model, seeds in runs.items():
         for seed, run in seeds.items():
@@ -828,7 +983,7 @@ def dropout_table(
                 )
     table = pd.DataFrame(rows)
     table["gnn_minus_mlp"] = table["accuracy"] - table["mlp_accuracy"]
-    return table.groupby(["bin", "model"]).agg(
+    return table.groupby(["bin", "model"], sort=False).agg(
         n_cells=("n_cells", "first"),
         median_genes=("median_genes", "first"),
         mlp_accuracy=("mlp_accuracy", "first"),
@@ -869,15 +1024,24 @@ def umap_coords(
     Subsampled cell indices and their 2-D UMAP of the PCs, cached on disk.
     """
     cache_path = Path(cache_path)
+    # Reuse the output folder safely when the PCs, cell order or sample changes.
+    digest = sha256()
+    for array in (labels, pcs):
+        array = np.ascontiguousarray(array)
+        digest.update(str((array.shape, array.dtype)).encode())
+        digest.update(array.tobytes())
+    digest.update(str((n_cells, seed)).encode())
+    fingerprint = digest.hexdigest()
     if cache_path.is_file():
-        cached = np.load(cache_path)
-        return cached["subset"], cached["coords"]
+        with np.load(cache_path, allow_pickle=False) as cached:
+            if "fingerprint" in cached and str(cached["fingerprint"]) == fingerprint:
+                return cached["subset"], cached["coords"]
     import umap
 
     subset = stratified_subsample(labels, n_cells, seed=seed)
     reducer = umap.UMAP(n_neighbors=15, min_dist=0.3, random_state=seed)
     coords = reducer.fit_transform(pcs[subset])
-    np.savez(cache_path, subset=subset, coords=coords)
+    np.savez(cache_path, subset=subset, coords=coords, fingerprint=fingerprint)
     return subset, coords
 
 
@@ -887,117 +1051,171 @@ def umap_coords(
 
 
 def plot_overview(
-    results: pd.DataFrame,
-    mlp: pd.DataFrame,
-    budgets: list[str],
-    graph: str,
-    depth_budget: str,
+    results: pd.DataFrame, mlp: pd.DataFrame, budgets: list[str]
 ) -> plt.Figure:
     """
-    Main comparison, label scarcity and depth panels, with the MLP baseline.
+    One main-comparison panel per graph, then label scarcity, depth and
+    neighbourhood size, with the MLP baseline.
     """
-    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
-    main = results[(results["experiment"] == "main") & (results["graph"] == graph)]
-    sns.barplot(
-        data=pd.concat([main, mlp]),
-        x="budget",
-        y="macro_f1",
-        hue="model",
-        errorbar="sd",
-        ax=axes[0],
-    )
-    axes[0].set_title(f"Main comparison ({graph}) vs MLP")
+    results = _with_labels(results)
+    mlp = _with_labels(mlp)
+    palette = {model_label(m): c for m, c in MODEL_COLOURS.items()}
+    graphs = list(dict.fromkeys(results.loc[results["experiment"] == "main", "graph"]))
+    has_neighbourhood = (results["experiment"] == "neighbourhood").any()
+    panels = len(graphs) + 2 + int(has_neighbourhood)
+    fig, axes = plt.subplots(1, panels, figsize=(7 * panels, 5))
+    for axis, graph in zip(axes, graphs):
+        main = results[(results["experiment"] == "main") & (results["graph"] == graph)]
+        sns.barplot(
+            data=pd.concat([main, mlp[mlp["budget"].isin(main["budget"])]]),
+            x="Budget",
+            y="macro_f1",
+            hue="Model",
+            palette=palette,
+            errorbar="sd",
+            ax=axis,
+        )
+        axis.set_title(f"Main comparison ({graph_label(graph)}) vs MLP")
 
-    scarcity = results[results["experiment"] == "scarcity"].copy()
-    scarcity["budget"] = pd.Categorical(scarcity["budget"], budgets, ordered=True)
+    scarcity = pd.concat([results[results["experiment"] == "scarcity"], mlp])
+    scarcity["Budget"] = pd.Categorical(
+        scarcity["Budget"], [budget_label(b) for b in budgets], ordered=True
+    )
     sns.lineplot(
         data=scarcity,
-        x="budget",
+        x="Budget",
         y="macro_f1",
-        hue="model",
+        hue="Model",
+        palette=palette,
         marker="o",
         errorbar="sd",
-        ax=axes[1],
+        ax=axes[len(graphs)],
     )
-    axes[1].scatter(
-        mlp["budget"], mlp["macro_f1"], marker="s", color="black", label="mlp"
-    )
-    axes[1].legend()
-    axes[1].set_title("Label scarcity (kNN) vs MLP")
+    axes[len(graphs)].set_title("Label scarcity ($k$-NN) vs MLP")
 
     depth = results[results["experiment"] == "depth"]
     sns.lineplot(
         data=depth,
         x="depth",
         y="macro_f1",
-        hue="model",
+        hue="Model",
+        palette=palette,
         marker="o",
         errorbar="sd",
-        ax=axes[2],
+        ax=axes[len(graphs) + 1],
     )
-    axes[2].set_title(f"Depth ({depth_budget} labels, kNN)")
-    axes[2].set_xticks(sorted(depth["depth"].unique()))
+    axes[len(graphs) + 1].set_title("Depth (5% labels, $k$-NN)")
+    axes[len(graphs) + 1].set_xticks(sorted(depth["depth"].unique()))
+    axes[len(graphs) + 1].set_xlabel("Message-passing layers")
+
+    if has_neighbourhood:
+        neighbourhood = results[results["experiment"] == "neighbourhood"].copy()
+        neighbourhood["k"] = neighbourhood["graph"].str.removeprefix("knn").astype(int)
+        sns.lineplot(
+            data=neighbourhood,
+            x="k",
+            y="macro_f1",
+            hue="Model",
+            palette=palette,
+            style="Budget",
+            marker="o",
+            errorbar="sd",
+            ax=axes[-1],
+        )
+        axes[-1].set_title("Neighbourhood size $k$ ($k$-NN)")
+        axes[-1].set_xticks(sorted(neighbourhood["k"].unique()))
     for axis in axes:
-        axis.set_ylabel("validation macro-F1 (GNNs: mean ± sd over seeds)")
+        axis.set_ylabel("Validation macro-F1 (mean ± sd over seeds)")
     fig.tight_layout()
     return fig
 
 
-def plot_confusions(
-    runs: dict[str, RunOutput], class_names: list[str], title: str
-) -> plt.Figure:
+def _with_labels(frame: pd.DataFrame) -> pd.DataFrame:
+    """Copy of a results table with report-style Model and Budget columns."""
+    return frame.assign(
+        Model=frame["model"].map(model_label),
+        Budget=frame["budget"].map(budget_label),
+    )
+
+
+def plot_confusions(tables: dict[str, pd.DataFrame], title: str) -> plt.Figure:
     """
-    Row-normalised confusion matrix for each model, side by side.
+    One row-normalised confusion matrix per model, side by side.
     """
-    fig, axes = plt.subplots(1, len(runs), figsize=(8 * len(runs), 7))
-    for axis, (model, run) in zip(np.atleast_1d(axes), runs.items()):
-        table = confusion_table(
-            run.predictions[run.mask], run.targets[run.mask], class_names
-        )
+    fig, axes = plt.subplots(1, len(tables), figsize=(8 * len(tables), 7))
+    for axis, (model, table) in zip(np.atleast_1d(axes), tables.items()):
+        names = [class_label(name) for name in table.index]
         sns.heatmap(
-            table,
+            table.to_numpy(),
             vmin=0,
             vmax=1,
             cmap="Blues",
             annot=True,
             fmt=".2f",
             cbar=False,
+            xticklabels=names,
+            yticklabels=names,
             ax=axis,
         )
-        axis.set_title(f"{model} | {title}")
+        axis.set_title(f"{model_label(model)} | {title}")
         axis.set_xlabel("Predicted")
         axis.set_ylabel("True")
     fig.tight_layout()
     return fig
 
 
-def plot_per_class_vs_homophily(per_class: pd.DataFrame) -> plt.Figure:
+def plot_per_class_vs_homophily(
+    per_class: pd.DataFrame, models: list[str], title: str
+) -> plt.Figure:
     """
-    Per-class F1 and the gated-minus-GCN gain against class homophily.
+    Per-class F1 of every model and the gated-minus-GCN gain against class
+    homophily.
     """
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    for model in ["gcn", "gated_gcn"]:
-        axes[0].scatter(per_class["endpoint_homophily"], per_class[model], label=model)
+    for model in models:
+        axes[0].scatter(
+            per_class["endpoint_homophily"],
+            per_class[model],
+            label=model_label(model),
+            color=MODEL_COLOURS.get(model),
+        )
+    if "mlp" in per_class:
+        axes[0].scatter(
+            per_class["endpoint_homophily"],
+            per_class["mlp"],
+            label="MLP",
+            color="black",
+            marker="x",
+        )
     axes[1].axhline(0, color="grey", lw=1)
     axes[1].scatter(per_class["endpoint_homophily"], per_class["gate_gain"])
     for name, row in per_class.iterrows():
         axes[0].annotate(
-            name, (row["endpoint_homophily"], row["gated_gcn"]), fontsize=7
+            class_label(name),
+            (row["endpoint_homophily"], row["gated_gcn"]),
+            fontsize=7,
         )
         axes[1].annotate(
-            name, (row["endpoint_homophily"], row["gate_gain"]), fontsize=7
+            class_label(name),
+            (row["endpoint_homophily"], row["gate_gain"]),
+            fontsize=7,
         )
-    axes[0].set_ylabel("validation F1")
+    axes[0].set_ylabel("Validation F1 (mean over seeds)")
     axes[0].legend()
-    axes[1].set_ylabel("F1 gain: gated GCN - GCN")
+    axes[1].set_ylabel("F1 gain: Gated GCN - GCN")
     for axis in axes:
         axis.set_xlabel("Class endpoint homophily (training graph)")
+    fig.suptitle(title)
     fig.tight_layout()
     return fig
 
 
 def plot_gate_vs_homophily(
-    run: RunOutput, homophily: np.ndarray, class_means: pd.DataFrame, seed: int
+    run: RunOutput,
+    homophily: np.ndarray,
+    class_means: pd.DataFrame,
+    seed: int,
+    title: str = "",
 ) -> plt.Figure:
     """
     Per-cell gate vs local homophily (one seed) and the class means.
@@ -1010,22 +1228,30 @@ def plot_gate_vs_homophily(
     axes[0].set_title(f"Cells, seed {seed}")
     axes[1].scatter(class_means["homophily"], class_means["gate"])
     for name, row in class_means.iterrows():
-        axes[1].annotate(name, (row["homophily"], row["gate"]), fontsize=7)
+        axes[1].annotate(class_label(name), (row["homophily"], row["gate"]), fontsize=7)
     axes[1].set_xlabel("Class mean local homophily")
     axes[1].set_ylabel("Class mean gate")
     axes[1].set_title("Class level (mean over seeds)")
+    fig.suptitle(title)
     fig.tight_layout()
     return fig
 
 
 def plot_umap(
-    coords: np.ndarray, colourings: dict[str, np.ndarray], title: str
+    coords: np.ndarray,
+    colourings: dict[str, np.ndarray],
+    title: str,
+    n_columns: int = 3,
 ) -> plt.Figure:
     """
     One UMAP panel per colouring: categorical arrays get a legend, floats a colorbar.
     """
-    fig, axes = plt.subplots(2, 2, figsize=(11, 9), dpi=72)
-    for axis, (name, values) in zip(axes.flat, colourings.items()):
+    n_rows = int(np.ceil(len(colourings) / n_columns))
+    fig, axes = plt.subplots(
+        n_rows, n_columns, figsize=(5.5 * n_columns, 4.5 * n_rows), dpi=72
+    )
+    axes = np.atleast_1d(axes).ravel()
+    for axis, (name, values) in zip(axes, colourings.items()):
         if values.dtype.kind == "f":
             points = axis.scatter(*coords.T, c=values, s=1, cmap="viridis")
             fig.colorbar(points, ax=axis)
@@ -1041,6 +1267,372 @@ def plot_umap(
         axis.set_title(name)
         axis.set_xticks([])
         axis.set_yticks([])
+    for axis in axes[len(colourings) :]:
+        axis.set_visible(False)
     fig.suptitle(title)
     fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Report figures: one graph per image, sized for one column of the report
+# ---------------------------------------------------------------------------
+
+REPORT_STYLE = {
+    "font.size": 12,
+    "axes.titlesize": 12,
+    "axes.labelsize": 12,
+    "legend.fontsize": 10,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+}
+REPORT_SIZE = (6.4, 4.8)
+
+
+def _place_labels(
+    axis: plt.Axes,
+    x: Iterable[float],
+    y: Iterable[float],
+    names: Iterable[str],
+    size: int = 8,
+) -> None:
+    """
+    Label points and push labels apart so they overlap neither each other nor
+    the other points. Call once the axis limits and layout are final.
+    """
+    fig = axis.figure
+    fig.canvas.draw()
+    to_px = axis.transData
+    points = to_px.transform(np.column_stack([np.asarray(x), np.asarray(y)]))
+    height = size * fig.dpi / 72 * 1.25
+    widths = [len(name) * size * fig.dpi / 72 * 0.55 for name in names]
+    text = points + np.array([6.0, 0.0])
+    for _ in range(300):
+        moved = False
+        for i in range(len(text)):
+            for j in range(i + 1, len(text)):
+                left, right = (i, j) if text[i, 0] <= text[j, 0] else (j, i)
+                overlap_x = text[left, 0] + widths[left] - text[right, 0]
+                overlap_y = height - abs(text[i, 1] - text[j, 1])
+                if overlap_x > 0 and overlap_y > 0:
+                    up, down = (i, j) if text[i, 1] >= text[j, 1] else (j, i)
+                    text[up, 1] += overlap_y / 2 + 0.5
+                    text[down, 1] -= overlap_y / 2 + 0.5
+                    moved = True
+        for i in range(len(text)):
+            for k in range(len(points)):
+                if k == i:
+                    continue
+                inside_x = text[i, 0] - 6 < points[k, 0] < text[i, 0] + widths[i] + 6
+                gap = text[i, 1] - points[k, 1]
+                need = height / 2 + 6
+                if inside_x and abs(gap) < need:
+                    text[i, 1] += (need - abs(gap) + 0.5) * (1 if gap >= 0 else -1)
+                    moved = True
+        if not moved:
+            break
+    inverse = to_px.inverted()
+    for point, label_px, name in zip(points, text, names):
+        shifted = abs(label_px[1] - point[1]) > 3
+        axis.annotate(
+            name,
+            xy=inverse.transform(point),
+            xytext=inverse.transform(label_px),
+            fontsize=size,
+            va="center",
+            arrowprops={"arrowstyle": "-", "lw": 0.5, "color": "grey"}
+            if shifted
+            else None,
+        )
+
+
+def report_class_f1_vs_homophily(
+    per_class: pd.DataFrame, models: list[str], title: str
+) -> plt.Figure:
+    """Per-class F1 of each model (and the MLP if present) against homophily."""
+    with plt.rc_context(REPORT_STYLE):
+        fig, axis = plt.subplots(figsize=REPORT_SIZE)
+        h = per_class["endpoint_homophily"]
+        for model in models:
+            axis.scatter(
+                h,
+                per_class[model],
+                s=30,
+                color=MODEL_COLOURS.get(model),
+                label=model_label(model),
+            )
+        if "mlp" in per_class:
+            axis.scatter(
+                h,
+                per_class["mlp"],
+                s=45,
+                color="black",
+                marker="x",
+                label="MLP",
+            )
+        axis.set_xlim(-0.03, 0.95)
+        axis.set_ylim(-0.03, 0.9)
+        axis.set_xlabel("Class endpoint homophily")
+        axis.set_ylabel("Validation F1 (mean over seeds)")
+        axis.set_title(title)
+        axis.legend(loc="lower right")
+        fig.tight_layout()
+        label_model = "gated_gcn" if "gated_gcn" in per_class else models[0]
+        _place_labels(
+            axis,
+            h,
+            per_class[label_model],
+            [class_label(n) for n in per_class.index],
+        )
+    return fig
+
+
+def report_gate_gain_by_class(
+    per_class: dict[str, pd.DataFrame], title: str
+) -> plt.Figure:
+    """Gated GCN minus GCN F1 per class, one bar per budget, sorted by homophily."""
+    with plt.rc_context(REPORT_STYLE):
+        fig, axis = plt.subplots(figsize=(REPORT_SIZE[0], REPORT_SIZE[1] * 1.15))
+        first = next(iter(per_class.values()))
+        order = first.sort_values("endpoint_homophily").index
+        y = np.arange(len(order))
+        height = 0.8 / len(per_class)
+        colours = ["tab:purple", "tab:cyan", "tab:olive", "tab:brown"]
+        for index, (budget, table) in enumerate(per_class.items()):
+            axis.barh(
+                y - 0.4 + height * (index + 0.5),
+                table.loc[order, "gate_gain"],
+                height=height,
+                color=colours[index % len(colours)],
+                label=f"{budget_label(budget)} labels",
+            )
+        axis.axvline(0, color="black", lw=1)
+        axis.set_yticks(
+            y,
+            [
+                f"{class_label(n)} ({first.loc[n, 'endpoint_homophily']:.2f})"
+                for n in order
+            ],
+        )
+        axis.set_xlabel("F1 difference (Gated GCN - GCN)")
+        axis.set_title(title)
+        axis.legend(loc="lower left")
+        fig.tight_layout()
+    return fig
+
+
+def report_mean_gate_by_budget(results: pd.DataFrame, budgets: list[str]) -> plt.Figure:
+    """Mean validation gate of the Gated GCN by label budget (scarcity runs)."""
+    rows = results[
+        (results["experiment"] == "scarcity") & (results["model"] == "gated_gcn")
+    ]
+    stats = rows.groupby("budget")["mean_gate"].agg(["mean", "std"]).reindex(budgets)
+    with plt.rc_context(REPORT_STYLE):
+        fig, axis = plt.subplots(figsize=REPORT_SIZE)
+        x = np.arange(len(budgets))
+        axis.errorbar(
+            x,
+            stats["mean"],
+            yerr=stats["std"],
+            marker="o",
+            capsize=4,
+            color=MODEL_COLOURS["gated_gcn"],
+        )
+        axis.set_xticks(x, [budget_label(b) for b in budgets])
+        axis.set_xlabel("Label budget")
+        axis.set_ylabel("Mean gate (1 = keep own features)")
+        axis.set_title("Gated GCN mean gate by label budget ($k$-NN)")
+        fig.tight_layout()
+    return fig
+
+
+def report_gate_cells(run: RunOutput, homophily: np.ndarray, title: str) -> plt.Figure:
+    """Gate against local homophily for the validation cells of one run."""
+    keep = run.mask & np.isfinite(homophily)
+    with plt.rc_context(REPORT_STYLE):
+        fig, axis = plt.subplots(figsize=REPORT_SIZE)
+        hexes = axis.hexbin(
+            homophily[keep], run.gate[keep], gridsize=35, mincnt=1, cmap="viridis"
+        )
+        fig.colorbar(hexes, ax=axis, label="Cells")
+        axis.set_xlabel("Local homophily of the cell")
+        axis.set_ylabel("Mean gate (1 = keep own features)")
+        axis.set_title(title)
+        fig.tight_layout()
+    return fig
+
+
+def report_gate_class_means(
+    class_means: pd.DataFrame, rho: float, p_value: float, title: str
+) -> plt.Figure:
+    """Class mean gate against class mean local homophily."""
+    with plt.rc_context(REPORT_STYLE):
+        fig, axis = plt.subplots(figsize=REPORT_SIZE)
+        axis.scatter(
+            class_means["homophily"],
+            class_means["gate"],
+            s=35,
+            color=MODEL_COLOURS["gated_gcn"],
+        )
+        axis.set_xlim(-0.03, 0.95)
+        axis.set_xlabel("Class mean local homophily")
+        axis.set_ylabel("Class mean gate")
+        axis.set_title(f"{title}\nSpearman $\\rho$ = {rho:.2f}, p = {p_value:.2f}")
+        fig.tight_layout()
+        _place_labels(
+            axis,
+            class_means["homophily"],
+            class_means["gate"],
+            [class_label(n) for n in class_means.index],
+        )
+    return fig
+
+
+def report_confusion(table: pd.DataFrame, title: str) -> plt.Figure:
+    """One row-normalised confusion matrix (rows: true class)."""
+    names = [class_label(name) for name in table.index]
+    with plt.rc_context(REPORT_STYLE):
+        fig, axis = plt.subplots(figsize=(7, 6.4))
+        sns.heatmap(
+            table.to_numpy(),
+            vmin=0,
+            vmax=1,
+            cmap="Blues",
+            annot=True,
+            fmt=".2f",
+            annot_kws={"size": 8},
+            cbar=False,
+            xticklabels=names,
+            yticklabels=names,
+            ax=axis,
+        )
+        axis.tick_params(axis="x", rotation=60)
+        axis.set_xlabel("Predicted class")
+        axis.set_ylabel("True class")
+        axis.set_title(title)
+        fig.tight_layout()
+    return fig
+
+
+def report_scarcity(
+    results: pd.DataFrame, mlp: pd.DataFrame, budgets: list[str]
+) -> plt.Figure:
+    """Macro-F1 by label budget for the scarcity models and the MLP."""
+    scarcity = results[results["experiment"] == "scarcity"]
+    curves = {"mlp": mlp.groupby("budget")["macro_f1"].agg(["mean", "std"])}
+    for model in scarcity["model"].unique():
+        rows = scarcity[scarcity["model"] == model]
+        curves[model] = rows.groupby("budget")["macro_f1"].agg(["mean", "std"])
+    with plt.rc_context(REPORT_STYLE):
+        fig, axis = plt.subplots(figsize=REPORT_SIZE)
+        x = np.arange(len(budgets))
+        for model, curve in curves.items():
+            curve = curve.reindex(budgets)
+            axis.errorbar(
+                x,
+                curve["mean"],
+                yerr=curve["std"],
+                marker="o",
+                capsize=3,
+                color=MODEL_COLOURS.get(model),
+                label=model_label(model),
+            )
+        axis.set_xticks(x, [budget_label(b) for b in budgets])
+        axis.set_xlabel("Label budget")
+        axis.set_ylabel("Validation macro-F1")
+        axis.set_title("Label scarcity ($k$-NN, depth 2)")
+        axis.legend()
+        fig.tight_layout()
+    return fig
+
+
+def report_neighbourhood(results: pd.DataFrame) -> plt.Figure:
+    """Macro-F1 against neighbourhood size k at each budget."""
+    rows = results[results["experiment"] == "neighbourhood"].copy()
+    rows["k"] = rows["graph"].str.removeprefix("knn").astype(int)
+    styles = {"5pct": "--", "full": "-"}
+    with plt.rc_context(REPORT_STYLE):
+        fig, axis = plt.subplots(figsize=REPORT_SIZE)
+        for model in rows["model"].unique():
+            for budget in rows["budget"].unique():
+                part = rows[(rows["model"] == model) & (rows["budget"] == budget)]
+                curve = part.groupby("k")["macro_f1"].agg(["mean", "std"])
+                axis.errorbar(
+                    curve.index,
+                    curve["mean"],
+                    yerr=curve["std"],
+                    marker="o",
+                    capsize=3,
+                    ls=styles.get(budget, "-"),
+                    color=MODEL_COLOURS.get(model),
+                    label=f"{model_label(model)}, {budget_label(budget)} labels",
+                )
+        axis.set_xticks(sorted(rows["k"].unique()))
+        low, high = axis.get_ylim()
+        axis.set_ylim(low, high + (high - low) * 0.35)
+        axis.set_xlabel("Neighbours per cell $k$")
+        axis.set_ylabel("Validation macro-F1")
+        axis.set_title("Neighbourhood size ($k$-NN, depth 2)")
+        axis.legend(loc="upper center", ncol=2, fontsize=9)
+        fig.tight_layout()
+    return fig
+
+
+def report_depth(results: pd.DataFrame) -> plt.Figure:
+    """Macro-F1 of every seed against depth, with the seed mean as a line."""
+    rows = results[results["experiment"] == "depth"]
+    models = list(rows["model"].unique())
+    shifts = np.linspace(-0.08, 0.08, len(models))
+    with plt.rc_context(REPORT_STYLE):
+        fig, axis = plt.subplots(figsize=REPORT_SIZE)
+        for model, shift in zip(models, shifts):
+            part = rows[rows["model"] == model]
+            axis.scatter(
+                part["depth"] + shift,
+                part["macro_f1"],
+                s=30,
+                color=MODEL_COLOURS.get(model),
+                label=f"{model_label(model)} (one dot per seed)",
+            )
+            mean = part.groupby("depth")["macro_f1"].mean()
+            axis.plot(
+                mean.index + shift,
+                mean.values,
+                color=MODEL_COLOURS.get(model),
+                alpha=0.5,
+            )
+        axis.set_xticks(sorted(rows["depth"].unique()))
+        low, high = axis.get_ylim()
+        axis.set_ylim(low, high + (high - low) * 0.3)
+        axis.set_xlabel("Message-passing layers")
+        axis.set_ylabel("Validation macro-F1")
+        axis.set_title("Depth (5% labels, $k$-NN)")
+        axis.legend(loc="upper left")
+        fig.tight_layout()
+    return fig
+
+
+def report_dropout_gap(dropout: pd.DataFrame, title: str) -> plt.Figure:
+    """GNN minus MLP accuracy per dropout bin for one setting."""
+    gap = dropout["gnn_minus_mlp_mean"].unstack("model")
+    gap = gap[sorted(gap.columns, key=list(MODEL_LABELS).index)]
+    with plt.rc_context(REPORT_STYLE):
+        fig, axis = plt.subplots(figsize=REPORT_SIZE)
+        for model in gap.columns:
+            axis.plot(
+                gap.index,
+                gap[model],
+                marker="o",
+                color=MODEL_COLOURS.get(model),
+                label=model_label(model),
+            )
+        axis.axhline(0, color="black", lw=1, label="MLP")
+        axis.set_xticks(sorted(gap.index))
+        low, high = axis.get_ylim()
+        axis.set_ylim(low - (high - low) * 0.45, high)
+        axis.set_xlabel("Genes-detected bin (1 = most dropout)")
+        axis.set_ylabel("Accuracy difference to MLP")
+        axis.set_title(title)
+        axis.legend(loc="lower center", ncol=3)
+        fig.tight_layout()
     return fig
