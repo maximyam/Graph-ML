@@ -20,10 +20,13 @@ conversion to edge lists.
 
 ## Run order
 
-1. Run `01-data_processing.ipynb`.
-2. Run `02-graph_engineering_baselines.ipynb` to create
-   `data/graph_engineering/`.
-3. Dependencies is based on gnn_course (course conda environment)
+1. Install the environment as described in the [README](../README.md).
+2. Run `01-data_processing.ipynb`.
+3. Run `02-graph_engineering_baselines.ipynb` to create
+   `data/graph_engineering_50pc/`.
+4. Run `03-gnn_training.ipynb` top to bottom. `RUN_MAIN` runs the 48 main
+   trainings and `RUN_ABLATIONS` the scarcity and depth grids. CUDA is used
+   when available; on a CPU the full grid takes several hours.
 
 
 ## Evaluation protocol
@@ -48,7 +51,7 @@ selected nodes.
 
 ## Outputs
 
-Results are written under `data/gnn_training/`:
+Results are written under `data/gnn_training_50pc/`:
 
 - `validation_results.csv`: one row per model, graph, budget, depth, and seed
 - `*.pt`: validation-selected model state dictionaries
@@ -58,6 +61,8 @@ Results are written under `data/gnn_training/`:
 - `gated_gcn_*_gate_values_metadata.csv`: cell IDs, cell types, split masks,
    and empirical local homophily aligned row-for-row with the gate array
 - `scarcity/` and `depth/`: optional ablation outputs from the notebook
+- `plots/`: `model_comparison.png`, `scarcity_curve.png`, `gate_vs_homophily.png`,
+   `training_dynamics.png`, drawn by the last cell from the saved results
 
 The gate array has shape `(n_cells, hidden_features)` for the final gated
 layer. Use its row mean for a scalar gate per cell, then group by `celltype`

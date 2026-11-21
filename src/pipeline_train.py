@@ -382,8 +382,8 @@ def run_experiments(
 
 def main() -> None:
 	parser = argparse.ArgumentParser(description="Run Step 3 sparse GNN experiments")
-	parser.add_argument("--export-root", default="data/graph_engineering")
-	parser.add_argument("--output-root", default="data/gnn_training")
+	parser.add_argument("--export-root", default="data/graph_engineering_50pc")
+	parser.add_argument("--output-root", default="data/gnn_training_50pc")
 	parser.add_argument("--budgets", nargs="+", default=["5pct", "full"])
 	parser.add_argument("--graphs", nargs="+", default=["knn", "snn"])
 	parser.add_argument("--models", nargs="+", default=["gcn", "graphsage", "gat", "gated_gcn"])

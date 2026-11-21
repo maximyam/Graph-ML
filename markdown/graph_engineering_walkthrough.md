@@ -12,9 +12,9 @@ Other classifiers, extra GNN architectures, rejection methods and marker recover
 
 ## How to run
 
-1. Use a Python 3.11 environment with the packages in `requirements.txt`. Install them with `python -m pip install -r requirements.txt` if needed.
+1. Install the environment as described in the [README](../README.md).
 2. Run [01-data_processing.ipynb](../01-data_processing.ipynb) first. Skip this step if its processed files are already available.
-3. Start Jupyter from the repository root. Open `02-graph_engineering_baselines.ipynb` and select the **graph-ml** kernel, or your environment's kernel.
+3. Start Jupyter from the repository root. Open `02-graph_engineering_baselines.ipynb` and select the **graph-ml** kernel.
 4. Keep `EVALUATE_TEST = False` during development. Run the cells from top to bottom.
 
 The notebook expects these files in **`data/processed/`**:
@@ -26,20 +26,20 @@ connectivities.npz
 work_processed.h5ad
 ```
 
-Outputs go to **`data/graph_engineering/`**. Matching graph files are reused, but the baseline models train again. Changes to inputs, settings or code rebuild the generated exports in this folder. Copy any results you want to keep before changing an experiment.
+Outputs go to **`data/graph_engineering_50pc/`**; the three-seed MLP summary goes to **`data/mlp_50pc/`**. Matching graph files are reused, but the baseline models train again. Changes to inputs, settings or code rebuild the generated exports in this folder. Copy any results you want to keep before changing an experiment.
 
 ## Notebook sections
 
 | Section | What it does |
 |---|---|
 | 1. Settings | Uses seed 42 and the existing 60/20/20 train, validation and test masks. Defines two training-label budgets. |
-| 2. Load inputs | Checks cell order and split masks. Uses the first 30 PCs as features. |
+| 2. Load inputs | Checks cell order and split masks. Uses the first 50 PCs as features. |
 | 3. k-NN | Finds 15 other neighbours per cell using Euclidean distance. Every query batch searches all cells. Keeps an undirected edge if either cell selects the other. |
 | 4. SNN | Weights each k-NN edge by the Jaccard overlap of its neighbour lists. Removes edges with zero overlap. |
 | 5. Graph statistics | Checks graph structure and reports degrees, components, isolated cells, clustering and weights. Includes the Scanpy graph as a reference. |
 | 6. Homophily | Measures same-type connections using only the selected training labels. Reports global and per-type values with supporting counts. |
 | 7. Export | Saves graphs, features, masks and targets for GNN training. |
-| 8. MLP | Compares hidden-layer widths 64 and 128. Selects the width and checkpoint using validation macro-F1. |
+| 8. MLP | Compares hidden-layer widths 64 and 128. Selects the width and checkpoint using validation macro-F1. Repeats each budget over seeds 42, 123 and 2024; the seed-42 model is exported. |
 | 9. Label Propagation | Propagates the available training labels over each graph. Reports convergence and any cells assigned a fallback class. |
 | 10. Validation | Compares MLP, LP on k-NN and LP on SNN at both budgets. Saves overall and per-type scores. |
 | 11. Test | Scores the fixed models only when final test evaluation is enabled. |
@@ -58,18 +58,20 @@ Both experiments use the same graph and validation/test masks. Unselected traini
 
 ## Where to find the outputs
 
-Paths below are relative to **`data/graph_engineering/`**. Section 12 of the notebook includes a loading example.
+Paths below are relative to **`data/graph_engineering_50pc/`**. Section 12 of the notebook includes a loading example.
 
 | File or folder | Use |
 |---|---|
 | `manifest.json` | Settings, file hashes and completion status. `graph_exports_complete` confirms the GNN inputs were saved. `baselines_complete` confirms all six baseline runs finished. |
 | `cell_ids.csv`, `class_names.json` | Shared cell order and the mapping from integer labels to cell types. |
-| `X_pca.npy` | Original 30-PC features used to build the graphs. |
+| `X_pca.npy` | Original 50-PC features used to build the graphs. |
 | `graphs/` | Sparse k-NN and SNN adjacency matrices, neighbour indices and distances. |
 | `labels_5pct/`, `labels_full/` | Each budget's `X_scaled.npy`, `masks.npz`, `training_labels.npy`, `validation_labels.npy` and fitted scaler. |
 | `analysis/` | Graph statistics and homophily tables. Use for analysis only. |
-| `results/` | Validation scores, per-type metrics, predictions, confusion matrices and MLP training histories. |
+| `results/` | Validation scores, per-type metrics, predictions, confusion matrices, MLP training histories for the seed-42 run. |
 | `models/` | MLP checkpoints and Label Propagation run details. |
+
+`data/mlp_50pc/` holds the three-seed MLP results: `validation_results.csv` (one row per budget and seed), `summary.csv` (mean and standard deviation over seeds), `per_class_f1.csv` and one `{budget}_seed{seed}_history.json` per run with both width trials.
 
 ## Using the exports for GNN training
 
